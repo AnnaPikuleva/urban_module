@@ -1,0 +1,191 @@
+CREATE OR REPLACE FUNCTION "public"."__asp_nearest_facility_make_triangles_new"("_job_uid" uuid, "_point_id" int4, "_max_meters" float8, "_nwtype" varchar)
+  RETURNS "pg_catalog"."int4" AS $BODY$
+  DECLARE
+	_ttt0 timestamptz;
+	_avg_z float;
+	_z float[];
+	_point0 geometry;
+	_diff float8;
+	_source_node_id int;
+	
+	_search_radius int4;
+	_search_radius_over int4;
+
+	_point_coords text;
+	_uuid_name text;
+	_command_sql text;
+	_graph text;
+	_vert_graph varchar(50);
+	_ring geometry;
+	_p geometry[];
+BEGIN
+		
+		--радиус поиска точки
+		_search_radius := cast( (_max_meters * 4.0) as int4);
+		
+		raise notice '_______________________________________________search_radius %', _search_radius;
+		
+		--центроид махали (берем одну махалю)
+	
+		_uuid_name := replace(cast(_job_uid as text), '-', '');
+		
+		
+		
+		
+		
+		--_diff := 1000.0::float8 / cast(1000.0::float8 as float)/COS(PI()/2.0-2.0*ATAN(EXP((st_y(_point0)*-1.0)/6378137.00)));
+		
+-- 		if _nwtype = 'driving' then
+		
+		_search_radius_over := 500;
+		
+		create table ring (ring_col geometry);
+		
+		EXECUTE 'DROP TABLE IF EXISTS iotables.near_facilities_triangles'|| _uuid_name || '_'||_point_id||'';
+		EXECUTE 'CREATE TABLE iotables.near_facilities_triangles'|| _uuid_name ||'_'||_point_id||' (
+		
+		  "id" int8,
+			"job_uid" uuid,
+			"source_node_id" int4,
+			"source_layer" varchar(254),
+			"geom" geometry,
+			"p1" geometry,
+			"z1" float8,
+			"p2" geometry,
+			"z2" float8,
+			"p3" geometry,
+			"z3" float8,
+			"avg_z" float8,
+			"max_diff" float8)';
+	
+
+		if _nwtype = 'driving'  then
+		
+				select node_id into _source_node_id 
+					from iotables.nearest_facilities_sources where point_id = _point_id;
+		
+				_point0 := (select yy.node_geom 
+								from iotables.nearest_facilities_sources as yy 
+									where yy.job_uid = _job_uid and 
+									yy.node_id = _source_node_id 
+									limit 1);
+									
+				raise notice '________________________________________________ _point0 %', _point0;
+				
+				
+				--координаты точки 
+				_point_coords := '' || cast(cast(st_x(_point0) as int4) as text) || ',' 
+				|| cast(cast(st_y(_point0) as int4) as text) || '';
+-- 				
+-- 				
+				raise notice '____________________________________________point_coords %', _point_coords;
+-- 				
+			--	выбираем только те дороги, которые попадают в заданный радиус
+				_command_sql := 
+							'SELECT link_id as id, source, target, meters as cost, meters as reverse_cost
+							 FROM streets_auto_tosh
+							 WHERE ar_auto_bool = ''t'' and 
+ 										ST_Intersects(geom,
+																	ST_Envelope(ST_Buffer(ST_SetSRID(ST_MakePoint(' || _point_coords || '),3857), 
+																	' || cast(_search_radius as text) || ' ))) ';
+										
+				raise notice '___________________________________________________command_sql %', _command_sql;
+
+				
+				insert into ring(ring_col) select 
+				--триагуляция между всеми точками 
+				st_setsrid(st_exteriorring((ST_Dump(ST_DelaunayTriangles
+				--точка с координатами 
+				(ST_Collect(st_makepoint(st_x(v.geom), st_y(v.geom), v.agg_cost))))).geom),3857)
+	
+-- 				into _ring
+							FROM
+							(
+								SELECT
+									--номера точек 
+									odata.seq, 
+									--узел
+									odata.node, 
+									--ребро
+									odata.edge,
+									--координаты начальной точки 
+									b.geom2d as geom, 
+									--стоимость от начального узла до узла графа
+									odata.agg_cost as agg_cost
+										FROM pgr_drivingDistance (
+													_command_sql, 
+													--id центроида махали
+													_source_node_id, 
+													CAST ( (_max_meters + _search_radius_over) AS DOUBLE PRECISION ), 
+													TRUE 
+										) as odata
+										CROSS JOIN LATERAL (
+												SELECT vtx.id, vtx.geom2d
+												FROM streets_auto_vertices_pgr_tosh AS vtx 
+												WHERE vtx.id = odata.node
+											) AS b
+							) as v;
+						
+								_z =	ARRAY[
+									st_z(st_pointn(_ring, 1)), 
+									st_z(st_pointn(_ring, 2)), 
+									st_z(st_pointn(_ring, 3))];
+				
+								select avg(unnest) into _avg_z from unnest(_z);
+								
+								
+								_p =	ARRAY[
+									st_pointn(_ring, 1), 
+									st_pointn(_ring, 2), 
+									st_pointn(_ring, 3)];
+									
+								
+-- 					EXECUTE 'INSERT INTO iotables.near_facilities_triangles'|| _uuid_name ||'_'||_point_id||' (geom)	
+-- 					values('||_ring||'';
+
+
+				else
+-- 		elseif _nwtype = 'walking' then	
+-- 		
+				_point0 := (select yy.geom 
+								from iotables.nearest_facilities_sources as yy 
+									where yy.job_uid = _job_uid and 
+									yy.point_id = _source_node_id 
+									limit 1);
+-- 									
+				raise notice '_________________________________________________point0 %', _point0;
+-- 				
+-- 				
+				--координаты точки 
+				_point_coords := '' || cast(cast(st_x(_point0) as int4) as text) || ',' 
+				|| cast(cast(st_y(_point0) as int4) as text) || '';
+-- 				
+-- 				
+				raise notice '__________________________________________________point_coords %', _point_coords;
+-- 				
+			--	выбираем только те дороги, которые попадают в заданный радиус
+				_command_sql := 
+							'SELECT link_id as id, source, target, meters as cost, meters as reverse_cost
+							 FROM streets_uzbekistan_old
+							 WHERE foot = 1 and 
+ 										ST_Intersects(geom,
+																	ST_Envelope(ST_Buffer(ST_SetSRID(ST_MakePoint(' || _point_coords || '),3857), 
+																	' || cast(_search_radius as text) || ' ))) ';
+										
+				raise notice '___________________________________________________command_sql %', _command_sql;
+-- 
+
+
+			END IF;
+			
+		
+		 
+		
+		
+		
+		return 1;
+END;
+
+$BODY$
+  LANGUAGE plpgsql VOLATILE
+  COST 100
