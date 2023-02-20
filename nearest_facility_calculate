@@ -1,0 +1,584 @@
+CREATE OR REPLACE FUNCTION "public"."__asp_nearest_facility_calculate"("_job_uid" uuid)
+  RETURNS "pg_catalog"."int4" AS $BODY$
+  DECLARE
+	_avg float;
+	_record_jobs record;
+-- 	_ttt0 timestamptz;
+	_i int;
+	_onerecord record;
+	_uuid uuid;
+	_id_node int;
+	_id_node_pesh int;
+	_count int;
+	_geom geometry;
+	_id int;
+	_uuid_name text;
+	_layer text;
+	_point0 geometry;
+	_target_layer text;
+	_point_pesh geometry;
+	
+	_search_radius_auto int4;
+	_search_radius_pesh int4;
+	_search_radius_over int4;
+	_search_radius int4;
+	
+	_point_coords_pesh text;
+	_point_coords text;
+	_command_sql text;
+	_command_sql_pesh text; 
+	_vert_graph varchar(50);
+	_max_meters int;
+	_node_id_targets int;
+	
+	_max_meters_auto int;
+	_max_meters_pesh int;
+	
+	_null_count int;
+	
+	_type text;
+	node_id_record record;
+	
+	
+	_node int;
+	
+-- 	_ttt1 timestampt;
+	_ttt0 timestamptz;
+	
+-- 	_layer []
+
+BEGIN
+
+
+-- 	_ttt0 := localtime;
+-- 	
+-- 	RAISE NOTICE '%', _ttt0;
+		
+		_ttt0 := clock_timestamp();
+		
+-- 	(SELECT count(*) FROM iotables.nearest_facilities_sources where job_uid = _job_uid);
+	
+	
+	
+	_uuid := _job_uid;
+	_uuid_name := replace(cast(_uuid as text), '-', '');
+	
+	
+		
+	update nearest_facilities_jobs set job_started = _ttt0 
+	where nearest_facilities_jobs.job_uid = _job_uid;
+	
+	update nearest_facilities_jobs set job_status = 'waiting' 
+	where nearest_facilities_jobs.job_uid = _job_uid;
+		
+		
+	
+	_max_meters_pesh := 5000;
+	_max_meters_auto := 10000;
+	
+	_search_radius_auto := 40000;
+	_search_radius_pesh := 10000;
+	
+-- 	_search_radius_over := 500;
+	_search_radius := 50000;
+	
+
+		
+	--cоздали таблицу со всеми факторами 
+	EXECUTE 'DROP TABLE IF EXISTS factor'|| _uuid_name || ' ';
+	EXECUTE 'CREATE TABLE factor'|| _uuid_name || ' as 
+	(select id , node_id, node_id_pesh from nearest_facilities_sources WHERE job_uid = '''|| _job_uid || ''' )';
+	EXECUTE 'ALTER TABLE factor'|| _uuid_name || '
+	ADD PRIMARY KEY (id)';
+
+	--берем каждую запись из таблицы с jobs							
+	FOR _record_jobs in select*from nearest_facilities_jobs where _uuid = nearest_facilities_jobs.job_uid
+	
+	LOOP 
+			_target_layer := _record_jobs.targets_layer;
+			RAISE NOTICE '_________________________________________% : _target_layer', _target_layer;
+			--добавляются названия колонок - факторов
+			EXECUTE
+			'ALTER TABLE factor'|| _uuid_name || '
+				ADD COLUMN	dist_avg_'||_target_layer||' float';
+	END LOOP;
+	
+	
+	_i := 0;
+
+	--создаем временную таблицу для хранения значений
+	drop table if exists prob_table;
+	create  table prob_table (avg_col float, layer text, node_id int, count_obj int, calc_type text, edin int);
+
+	--берем каждый узел из графа дорог на автомобильном графе 							
+	FOR _onerecord IN select distinct node_id, node_geom from nearest_facilities_sources 
+	where (node_id is not null) and (job_uid = _uuid) order by node_id limit 1
+			LOOP 
+			
+			_point0 := _onerecord.node_geom;
+			_id_node := _onerecord.node_id; 
+				
+			_i := _i+1;
+							
+			raise notice '________________________________________________ _i %', _i;
+			raise notice '________________________________________________ _id_node %', _id_node;
+			
+			--координаты точки 
+			_point_coords := '' || cast(cast(st_x(_point0) as int4) as text) || ',' 
+			|| cast(cast(st_y(_point0) as int4) as text) || '';
+
+			--	выбираем авто дороги, которые попадают в радиус
+			_command_sql := 
+						'SELECT link_id as id, source, target, meters as cost, meters as reverse_cost
+						 FROM streets_auto_tosh
+						 WHERE ar_auto_bool = ''t'' and 
+									ST_Intersects(geom,
+																ST_Envelope(ST_Buffer(ST_SetSRID(
+																ST_MakePoint(' || _point_coords || '),3857), 
+																' || cast(_search_radius_auto as text) || ' ))) ';
+
+				with geom_tri as (
+				select 
+				--строим триангуляцию из точек узлов, которые попадают в радиус
+				(ST_Dump(
+					ST_DelaunayTriangles(
+					ST_Collect(st_makepoint(st_x(v.geom), st_y(v.geom), v.agg_cost)))
+					
+					)).geom as geom 
+
+							FROM
+							(
+								SELECT
+									--номера точек 
+									odata.seq, 
+									--узел
+									odata.node, 
+									--ребро
+									odata.edge,
+									--координаты начальной точки 
+									b.geom2d as geom, 
+									--стоимость от начального узла до узла графа
+									odata.agg_cost as agg_cost
+									
+										FROM pgr_drivingDistance (
+													_command_sql, 
+													--id центроида махали
+													_id_node, 
+													CAST ( (_search_radius_auto) AS DOUBLE PRECISION ), 
+													TRUE 
+										) as odata
+										CROSS JOIN LATERAL (
+												SELECT vtx.id, vtx.geom2d
+												FROM streets_auto_vertices_pgr_tosh AS vtx 
+												WHERE vtx.id = odata.node
+											) AS b
+							) as v),
+
+						
+						avg_array as (select  
+						st_setsrid(geom, 3857) as geom,
+						 unnest(
+							ARRAY[
+								st_z(st_pointn(ST_ExteriorRing(geom), 1)), 
+								st_z(st_pointn(ST_ExteriorRing(geom), 2)), 
+								st_z(st_pointn(ST_ExteriorRing(geom), 3))]) 
+							 from geom_tri),
+						 
+						
+						tri as (
+						select  geom, avg(avg_array.unnest) as avg_column
+						from avg_array
+						GROUP BY geom)
+						
+						--добавляем минимальное растояние, слой, точку от которой считали, количество объектов, тип во временную таблицу
+						insert into prob_table 
+						select 
+						COALESCE(min(avg_column), 21000), layer, _id_node as node_id, count(*) as count_obj, 'driving', 1
+						from tri FULL JOIN  
+						nearest_facilities_targets as targets
+						on ST_Intersects(tri.geom, targets.geom)  
+-- 									where targets.layer = _targets_layer and 
+						where targets.type_graph = 'driving' and
+						_uuid = targets.job_uid
+						group by layer;
+						
+						update nearest_facilities_jobs set sourse_count = _i
+						where nearest_facilities_jobs.job_uid = _job_uid;
+			
+			
+		END LOOP;
+
+		
+		_i := 0;
+
+		--берем каждый узел из графа дорог							
+		FOR _onerecord IN select distinct node_id_pesh, node_geom_pesh from nearest_facilities_sources 
+		where (node_id is not null) and (job_uid = _uuid) order by node_id_pesh limit 1
+
+
+		LOOP 
+			
+				_geom := _onerecord.node_geom_pesh;
+	-- 			_id := _onerecord.id;
+	-- 			_id_node := _onerecord.node_id_pesh;
+				_id_node_pesh := _onerecord.node_id_pesh; 
+					
+				_i := _i+1;
+
+				--координаты точки 
+				_point_coords_pesh := '' || cast(cast(st_x(_geom) as int4) as text) || ',' 
+				|| cast(cast(st_y(_point_pesh) as int4) as text) || '';
+
+				raise notice '____________________________________________ _i %', _i;
+				raise notice '_____________________________________________ _id_node_pesh %', _id_node_pesh;
+
+
+				--	выбираем только те дороги, которые попадают в заданный радиус
+				_command_sql_pesh := 
+					'SELECT link_id as id, source, target, meters as cost, meters as reverse_cost
+					 FROM streets_tashkent
+					 WHERE foot = 1 and 
+						ST_Intersects(geom,
+													ST_Envelope(ST_Buffer(ST_SetSRID(ST_MakePoint(' || _point_coords_pesh || '),3857), 
+													' || cast(_search_radius_pesh as text) || ' ))) ';
+											
+-- 				raise notice '____________________________________________________command_sql_pesh %', _command_sql_pesh;
+	-- 
+-- 							
+-- 					
+					with geom_tri as (
+						select 
+						--триагуляция между всеми точками 
+						(ST_Dump(
+							ST_DelaunayTriangles(
+							ST_Collect(st_makepoint(st_x(v.geom), st_y(v.geom), v.agg_cost)))
+							
+							)).geom as geom 
+
+									FROM
+									(
+										SELECT
+											--номера точек 
+											odata.seq, 
+											--узел
+											odata.node, 
+											--ребро
+											odata.edge,
+											--координаты начальной точки 
+											b.geom2d as geom, 
+											--стоимость от начального узла до узла графа
+											odata.agg_cost as agg_cost
+											
+												FROM pgr_drivingDistance (
+															_command_sql, 
+															--id центроида махали
+															_id_node_pesh, 
+															CAST ( (_max_meters_pesh) AS DOUBLE PRECISION ), 
+															TRUE 
+												) as odata
+												CROSS JOIN LATERAL (
+														SELECT vtx.id, vtx.geom2d
+														FROM streets_tashkent_vertices_pgr AS vtx 
+														WHERE vtx.id = odata.node
+													) AS b
+									) as v),
+										
+		-- 						raise notice '___________________________________________________i %', _i;
+									
+									avg_array as (select  
+									st_setsrid(geom, 3857) as geom,
+									 unnest(
+										ARRAY[
+											st_z(st_pointn(ST_ExteriorRing(geom), 1)), 
+											st_z(st_pointn(ST_ExteriorRing(geom), 2)), 
+											st_z(st_pointn(ST_ExteriorRing(geom), 3))]) 
+										 from geom_tri),
+		-- 									 
+		-- 		-- 								 insert into table_prob 
+		-- 									
+									tri as (
+									select  geom, avg(avg_array.unnest) as avg_column
+									from avg_array
+									GROUP BY geom)
+									
+									
+									insert into prob_table select 
+									COALESCE(min(avg_column), 21000), layer, _id_node_pesh as node_id, count(*) as count_obj, 'walking', 1
+									from tri FULL JOIN  
+									nearest_facilities_targets as targets
+									on ST_Intersects(tri.geom, targets.geom)  
+									where type_graph = 'walking' and 
+									_uuid = targets.job_uid
+									group by layer
+									;
+									
+									update nearest_facilities_jobs set sourse_count = _i
+									where nearest_facilities_jobs.job_uid = _job_uid;
+		
+			END LOOP;
+	
+
+-- 								
+			FOR _onerecord in select * from prob_table  
+			
+			LOOP 
+
+				_count = _onerecord.count_obj;
+				_node = _onerecord.node_id;
+				_avg = _onerecord.avg_col;
+				_layer = _onerecord.layer;
+				_type = _onerecord.calc_type;
+				
+					
+				raise notice '________________________________________________ _layer %', _layer;
+				raise notice '________________________________________________ _avg %', _avg;
+				raise notice '________________________________________________ _count %', _count;
+			
+				if _count < 10 and _avg = 21000  and _type = 'driving' then 
+				
+						drop table if exists metres_table;
+						create temp table metres_table (meters float);
+					
+						FOR _node_id_targets in select node_id from nearest_facilities_targets where 
+						layer = _layer and _job_uid = job_uid
+						LOOP		
+								insert into metres_table
+								select meters from "public"."__asp_get_route_cars_tosh"(_node, _node_id_targets);
+
+								select min(meters) into _avg from metres_table;
+								
+								UPDATE prob_table SET avg_col = COALESCE(_avg, 21000) WHERE _layer = prob_table.layer 								and _node = prob_table.node_id;
+						
+						END LOOP;
+
+				elseif  _avg = 21000 and _type = 'driving' then 
+				
+-- 					BEGIN
+-- 				for _onerecord in 
+-- 				select distinct node_id, node_geom
+-- 				from nearest_facilities_sources 
+-- 				where (node_id = _node) and (job_uid = _uuid)
+				
+						select distinct node_geom into _point0 from nearest_facilities_sources 
+						where (node_id = _node) and (job_uid = _uuid);
+						
+						select distinct node_id into _id_node from nearest_facilities_sources 
+						where (node_id = _node) and (job_uid = _uuid);
+						
+						_point_coords := '' || cast(cast(st_x(_point0) as int4) as text) || ',' 
+						|| cast(cast(st_y(_point0) as int4) as text) || '';
+
+
+										--	выбираем авто дороги, которые попадают в радиус
+						_command_sql := 
+									'SELECT link_id as id, source, target, meters as cost, meters as reverse_cost
+									 FROM streets_auto_tosh
+									 WHERE ar_auto_bool = ''t'' and 
+												ST_Intersects(geom,
+																			ST_Envelope(ST_Buffer(ST_SetSRID(
+																			ST_MakePoint(' || _point_coords || '),3857), 
+																			' || cast(_search_radius as text) || ' ))) ';
+																			
+																			
+												with geom_tri as (
+								select 
+								--триагуляция между всеми точками 
+								(ST_Dump(
+									ST_DelaunayTriangles(
+									ST_Collect(st_makepoint(st_x(v.geom), st_y(v.geom), v.agg_cost)))
+									
+									)).geom as geom 
+
+											FROM
+											(
+												SELECT
+													--номера точек 
+													odata.seq, 
+													--узел
+													odata.node, 
+													--ребро
+													odata.edge,
+													--координаты начальной точки 
+													b.geom2d as geom, 
+													--стоимость от начального узла до узла графа
+													odata.agg_cost as agg_cost
+													
+														FROM pgr_drivingDistance (
+																	_command_sql, 
+																	--id центроида махали
+																	_id_node, 
+																	CAST ( (_search_radius) AS DOUBLE PRECISION ), 
+																	TRUE 
+														) as odata
+														CROSS JOIN LATERAL (
+																SELECT vtx.id, vtx.geom2d
+																FROM streets_auto_vertices_pgr_tosh AS vtx 
+																WHERE vtx.id = odata.node
+															) AS b
+											) as v),
+		-- 
+		-- 								
+										avg_array as (select  
+										st_setsrid(geom, 3857) as geom,
+										 unnest(
+											ARRAY[
+												st_z(st_pointn(ST_ExteriorRing(geom), 1)), 
+												st_z(st_pointn(ST_ExteriorRing(geom), 2)), 
+												st_z(st_pointn(ST_ExteriorRing(geom), 3))]) 
+											 from geom_tri),
+		-- 								 
+		-- 								
+										tri as (
+										select  geom, avg(avg_array.unnest) as avg_column
+										from avg_array
+										GROUP BY geom)
+		-- 								
+		-- 								
+										UPDATE prob_table SET avg_col = 
+										
+										COALESCE(min(avg_column), 21000) from tri 
+										FULL JOIN  
+										nearest_facilities_targets as targets
+										on ST_Intersects(tri.geom, targets.geom)  
+			-- 									where targets.layer = _targets_layer and 
+										where targets.type_graph = 'driving' and
+										_uuid = targets.job_uid
+										and _id_node = prob_table.node_id;
+
+-- 								END;
+-- 				
+				elseif _avg = 21000 and _type = 'walking' then 
+				
+-- 				BEGIN
+				
+-- 				for _onerecord in 
+-- 				select distinct node_id_pesh, node_geom_pesh
+-- 				from nearest_facilities_sources 
+-- 				where (node_id = _node) and (job_uid = _uuid) 
+
+				
+				
+						select distinct node_geom_pesh into  _point0 from nearest_facilities_sources 
+						where (node_id = _node) and (job_uid = _uuid);
+						
+						select distinct id_node_pesh into _id_node_pesh from nearest_facilities_sources 
+						where (node_id = _node) and (job_uid = _uuid);
+						
+						_point_coords := '' || cast(cast(st_x(_point0) as int4) as text) || ',' 
+						|| cast(cast(st_y(_point0) as int4) as text) || '';
+
+
+										--	выбираем авто дороги, которые попадают в радиус
+						_command_sql := 
+									'SELECT link_id as id, source, target, meters as cost, meters as reverse_cost
+									 FROM streets_tashkent
+									 WHERE ar_foot_bool = ''t'' and 
+												ST_Intersects(geom,
+																			ST_Envelope(ST_Buffer(ST_SetSRID(
+																			ST_MakePoint(' || _point_coords || '),3857), 
+																			' || cast(_search_radius as text) || ' ))) ';
+																			
+																			
+												with geom_tri as (
+								select 
+								--триагуляция между всеми точками 
+								(ST_Dump(
+									ST_DelaunayTriangles(
+									ST_Collect(st_makepoint(st_x(v.geom), st_y(v.geom), v.agg_cost)))
+									
+									)).geom as geom 
+
+											FROM
+											(
+												SELECT
+													--номера точек 
+													odata.seq, 
+													--узел
+													odata.node, 
+													--ребро
+													odata.edge,
+													--координаты начальной точки 
+													b.geom2d as geom, 
+													--стоимость от начального узла до узла графа
+													odata.agg_cost as agg_cost
+													
+														FROM pgr_drivingDistance (
+																	_command_sql, 
+																	--id центроида махали
+																	_id_node, 
+																	CAST ( (_search_radius) AS DOUBLE PRECISION ), 
+																	TRUE 
+														) as odata
+														CROSS JOIN LATERAL (
+																SELECT vtx.id, vtx.geom2d
+																FROM streets_tashkent_vertices_pgr AS vtx 
+																WHERE vtx.id = odata.node
+															) AS b
+											) as v),
+		-- 
+		-- 								
+										avg_array as (select  
+										st_setsrid(geom, 3857) as geom,
+										 unnest(
+											ARRAY[
+												st_z(st_pointn(ST_ExteriorRing(geom), 1)), 
+												st_z(st_pointn(ST_ExteriorRing(geom), 2)), 
+												st_z(st_pointn(ST_ExteriorRing(geom), 3))]) 
+											 from geom_tri),
+		-- 								 
+		-- 								
+										tri as (
+										select  geom, avg(avg_array.unnest) as avg_column
+										from avg_array
+										GROUP BY geom)
+		-- 								
+		-- 								
+										UPDATE prob_table SET avg_col = 
+										
+										COALESCE(min(avg_column), 21000) from tri 
+										FULL JOIN  
+										nearest_facilities_targets as targets
+										on ST_Intersects(tri.geom, targets.geom)  
+			-- 									where targets.layer = _targets_layer and 
+										where targets.type_graph = 'walking' and
+										_uuid = targets.job_uid
+										and _id_node_pesh = prob_table.node_id;
+-- 										
+-- 							END;	
+				end if; 
+
+				EXECUTE 'UPDATE  factor'|| _uuid_name ||' 
+				SET
+				dist_avg_'||_layer||'  = '||_avg||'
+				WHERE 
+				factor'|| _uuid_name || ' .node_id = '|| _node ||' 
+				or 
+				factor'|| _uuid_name || ' .node_id_pesh = '|| _node ||' ';
+
+		
+	
+			END LOOP;
+			
+-- 			end;
+
+-- 	_ttt1 := localtime - _ttt0;
+ _ttt0 := clock_timestamp();
+ RAISE NOTICE ' ----------------------------------------------- time %', datediff_ms(_ttt0);
+	
+	update nearest_facilities_jobs set job_finished = _ttt0 
+	where nearest_facilities_jobs.job_uid = _job_uid;
+	
+	update nearest_facilities_jobs set job_status = 'done' 
+	where nearest_facilities_jobs.job_uid = _job_uid;
+		
+	
+-- 	RAISE NOTICE '% : begin with % sources', datediff_ms(_ttt0);
+	
+-- 	RAISE NOTICE '% ', _ttt1;
+	
+	RETURN 1;
+END;
+
+$BODY$
+  LANGUAGE plpgsql VOLATILE
+  COST 100
