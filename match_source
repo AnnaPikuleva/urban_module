@@ -1,0 +1,170 @@
+CREATE OR REPLACE FUNCTION "public"."__asp_nearest_facility_match_points"("_job_uid" uuid)
+  RETURNS TABLE("ptype" int4, "geom" text) AS $BODY$
+DECLARE
+	_ttt0 timestamptz;
+	_limit_meters int4 := 5000;
+	_sources int4 := 0;
+	_targets int4 := 0;
+	
+	_find_edges bool := false;
+	--5500 sources, 2500 targets = 9 minutes (530 sec)
+BEGIN
+	
+	_ttt0 := clock_timestamp();
+	
+	select count(id) into _sources from iotables.nearest_facilities_sources	where job_uid = _job_uid;
+	select count(id) into _targets from iotables.nearest_facilities_targets	where job_uid = _job_uid;
+	
+	if _sources = 0 or _targets = 0 then
+		RAISE EXCEPTION 'sources:%, targets:%', _sources, _targets; 
+	end if;
+	
+	RAISE NOTICE '% : count all', datediff_ms(_ttt0);_ttt0 := clock_timestamp();
+	
+	-- ################################################
+	-- каждой точке [SOURCES] ищем ближайший узел на графе
+	-- ################################################
+	UPDATE iotables.nearest_facilities_sources
+	SET
+		node_id = j.id2,
+		node_geom = j.bgeom,
+		node_distance = j.distance
+	FROM
+		(
+			select odata.id as id1, b.id as id2, b.geom2d as bgeom, b.distance
+			FROM
+					iotables.nearest_facilities_sources AS odata
+						CROSS JOIN LATERAL (
+							SELECT vtx.id, vtx.geom2d, (vtx.geom2d <-> odata.geom) as distance
+							FROM streets_auto_vertices_pgr_tosh AS vtx 
+							WHERE (vtx.geom2d <-> odata.geom) < _limit_meters 
+							ORDER BY (vtx.geom2d <-> odata.geom)
+							LIMIT 1
+						) AS b
+			WHERE odata.job_uid = _job_uid
+		) as j
+	WHERE iotables.nearest_facilities_sources.id = j.id1;
+	
+	RAISE NOTICE '% : updated sources nodes', datediff_ms(_ttt0);_ttt0 := clock_timestamp();
+	
+	
+	UPDATE iotables.nearest_facilities_sources
+	SET
+		node_id_pesh = j.id2,
+		node_geom_pesh = j.bgeom,
+		node_distance_pesh = j.distance
+	FROM
+		(
+			select odata.id as id1, b.id as id2, b.geom2d as bgeom, b.distance
+			FROM
+					iotables.nearest_facilities_sources AS odata
+						CROSS JOIN LATERAL (
+							SELECT vtx.id, vtx.geom2d, (vtx.geom2d <-> odata.geom) as distance
+							FROM streets_tashkent_vertices_pgr AS vtx 
+							WHERE (vtx.geom2d <-> odata.geom) < _limit_meters 
+							ORDER BY (vtx.geom2d <-> odata.geom)
+							LIMIT 1
+						) AS b
+			WHERE odata.job_uid = _job_uid
+		) as j
+	WHERE iotables.nearest_facilities_sources.id = j.id1;
+	
+	RAISE NOTICE '% : updated sources nodes', datediff_ms(_ttt0);_ttt0 := clock_timestamp();
+	
+	
+	
+	-- ################################################
+	-- каждой точке [TARGETS] ищем ближайший узел на графе
+	-- ################################################
+-- 	UPDATE iotables.nearest_facilities_targets
+-- 	SET
+-- 		node_id = j.id2,
+-- 		node_geom = j.bgeom,
+-- 		node_distance = j.distance
+-- 	FROM
+-- 		(
+-- 			select odata.id as id1, b.id as id2, b.geom2d as bgeom, b.distance
+-- 			FROM
+-- 					iotables.nearest_facilities_targets AS odata
+-- 						CROSS JOIN LATERAL (
+-- 							SELECT vtx.id, vtx.geom2d, (vtx.geom2d <-> odata.geom) as distance
+-- 							FROM streets_auto_vertices_pgr_tosh AS vtx 
+-- 							WHERE (vtx.geom2d <-> odata.geom) < _limit_meters 
+-- 							ORDER BY (vtx.geom2d <-> odata.geom)
+-- 							LIMIT 1
+-- 						) AS b
+-- 			WHERE odata.job_uid = _job_uid
+-- 		) as j
+-- 	WHERE iotables.nearest_facilities_targets.id = j.id1;
+-- 	
+-- 	RAISE NOTICE '% : updated targets nodes', datediff_ms(_ttt0);_ttt0 := clock_timestamp();
+-- 	
+	if _find_edges = true THEN
+		-- ################################################
+		-- каждой точке [SOURCES] ищем ближайшее ребро на графе
+		-- ################################################
+		UPDATE iotables.nearest_facilities_sources
+		SET
+			edge_id = j.id2,
+			edge_distance = j.distance
+		FROM
+			(
+				select odata.id as id1, b.id as id2, b.geom as bgeom, b.distance
+				FROM
+						iotables.nearest_facilities_sources AS odata
+							CROSS JOIN LATERAL (
+								SELECT vtx.id, vtx.geom, (vtx.geom <-> odata.geom) as distance
+								FROM streets_auto_tosh AS vtx 
+								WHERE vtx.ar_auto_bool = TRUE and (vtx.geom <-> odata.geom) < _limit_meters 
+								ORDER BY (vtx.geom <-> odata.geom)
+								LIMIT 1
+							) AS b
+				WHERE odata.job_uid = _job_uid
+			) as j
+		WHERE iotables.nearest_facilities_sources.id = j.id1;
+		
+		RAISE NOTICE '% : updated sources edges', datediff_ms(_ttt0);_ttt0 := clock_timestamp();
+		
+		
+		UPDATE iotables.nearest_facilities_sources
+		SET
+			edge_id_pesh = j.id2,
+			edge_distance_pesh = j.distance
+		FROM
+			(
+				select odata.id as id1, b.id as id2, b.geom as bgeom, b.distance
+				FROM
+						iotables.nearest_facilities_sources AS odata
+							CROSS JOIN LATERAL (
+								SELECT vtx.id, vtx.geom, (vtx.geom <-> odata.geom) as distance
+								FROM streets_tashkent AS vtx 
+								WHERE (vtx.geom <-> odata.geom) < _limit_meters 
+								ORDER BY (vtx.geom <-> odata.geom)
+								LIMIT 1
+							) AS b
+				WHERE odata.job_uid = _job_uid
+			) as j
+		WHERE iotables.nearest_facilities_sources.id = j.id1;
+		
+		RAISE NOTICE '% : updated sources edges', datediff_ms(_ttt0);_ttt0 := clock_timestamp();
+		
+		
+	END IF;
+	
+	--DELETE FROM iotables.nearest_facilities_targets as odata
+	--WHERE odata.job_uid = _job_uid and odata.node_id is null
+	
+	RETURN QUERY
+	SELECT 1, st_asgeojson(st_transform(odata.geom,4326))::text
+	FROM iotables.nearest_facilities_sources as odata
+	WHERE odata.job_uid = _job_uid and odata.node_id is null
+	--UNION ALL
+	--SELECT 2, st_asgeojson(st_transform(odata.geom,4326))::text
+	--FROM iotables.nearest_facilities_targets as odata
+	--WHERE odata.job_uid = _job_uid and odata.node_id is null
+	;
+END;
+$BODY$
+  LANGUAGE plpgsql VOLATILE
+  COST 100
+  ROWS 1000
